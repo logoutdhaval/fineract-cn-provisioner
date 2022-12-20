@@ -25,10 +25,7 @@ import com.datastax.driver.core.schemabuilder.SchemaBuilder;
 import org.apache.fineract.cn.provisioner.config.ProvisionerConstants;
 import org.apache.fineract.cn.provisioner.internal.util.DataSourceUtils;
 import java.nio.ByteBuffer;
-import java.sql.Connection;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.sql.Statement;
+import java.sql.*;
 import java.util.Date;
 import java.util.UUID;
 import javax.annotation.PostConstruct;
@@ -44,6 +41,7 @@ import org.slf4j.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.core.env.Environment;
 import org.springframework.security.crypto.util.EncodingUtils;
 import org.springframework.stereotype.Component;
@@ -51,6 +49,7 @@ import org.springframework.util.Base64Utils;
 
 @SuppressWarnings({"SqlNoDataSourceInspection", "SqlDialectInspection", "unused"})
 @Component
+//@ConditionalOnProperty("maindb.postgres")
 public class ProvisionerInitializer {
 
   private final Environment environment;
@@ -60,6 +59,8 @@ public class ProvisionerInitializer {
   private final HashGenerator hashGenerator;
   private final String initialClientId;
   private String metaKeySpaceName;
+  @Value("${maindb.postgres}")
+  private boolean isMainDBPostgres;
 
   @Autowired
   public ProvisionerInitializer(final Environment environment, @Qualifier(ProvisionerConstants.LOGGER_NAME) final Logger logger,
@@ -81,9 +82,8 @@ public class ProvisionerInitializer {
       metaKeySpaceName = this.environment.getProperty(
           CassandraConnectorConstants.KEYSPACE_PROP,
           CassandraConnectorConstants.KEYSPACE_PROP_DEFAULT);
-
-      this.initializeCassandra();
       this.initializeDatabase(PostgreSQLConstants.POSTGRESQL_DATABASE_NAME_DEFAULT);
+      this.initializeCassandra();
       this.createTableTenants();
     } catch (final Exception ex) {
       throw new IllegalStateException("Could not initialize service!", ex);
@@ -93,107 +93,205 @@ public class ProvisionerInitializer {
 
   private void initializeCassandra() throws Exception {
     final Session session = this.cassandraSessionProvider.getAdminSession();
+    if(isMainDBPostgres){
+      final Connection connection = DataSourceUtils.createProvisionerConnection(this.environment, "seshat");
+      final Statement statement = connection.createStatement();
 
-    if (session.getCluster().getMetadata().getKeyspace(metaKeySpaceName).getTable(ConfigEntity.TABLE_NAME) == null) {
-      //create config family
-      final String createConfigTableStatement = SchemaBuilder.createTable(ConfigEntity.TABLE_NAME)
-          .addPartitionKey(ConfigEntity.NAME_COLUMN, DataType.text())
-          .addColumn(ConfigEntity.SECRET_COLUMN, DataType.blob())
-          .buildInternal();
-
-      session.execute(createConfigTableStatement);
+      final StringBuilder createConfigTableStatement = new StringBuilder();
+      createConfigTableStatement.append("CREATE TABLE IF NOT EXISTS ").append(ConfigEntity.TABLE_NAME).append("(")
+                      .append(ConfigEntity.NAME_COLUMN).append(" text , ")
+                      .append(ConfigEntity.SECRET_COLUMN).append(" bytea )");
+      statement.execute(createConfigTableStatement.toString());
 
       final byte[] secret = this.saltGenerator.createRandomSalt();
-      final BoundStatement configBoundStatement = session.prepare("INSERT INTO config (name, secret) VALUES (?, ?)").bind();
-      configBoundStatement.setString("name", ProvisionerConstants.CONFIG_INTERNAL);
-      configBoundStatement.setBytes("secret", ByteBuffer.wrap(secret));
-      session.execute(configBoundStatement);
+      final PreparedStatement configPreparedStatement = connection.prepareStatement("INSERT INTO config (name, secret) VALUES (?, ?)");
+      configPreparedStatement.setString(1, ProvisionerConstants.CONFIG_INTERNAL);
+      configPreparedStatement.setBytes(2, secret);
+      configPreparedStatement.execute();
 
-      //create users family
-      final String createUsersTableStatement = SchemaBuilder.createTable(UserEntity.TABLE_NAME)
-          .addPartitionKey(UserEntity.NAME_COLUMN, DataType.text())
-          .addColumn(UserEntity.PASSWORD_COLUMN, DataType.blob())
-          .addColumn(UserEntity.SALT_COLUMN, DataType.blob())
-          .addColumn(UserEntity.ITERATION_COUNT_COLUMN, DataType.cint())
-          .addColumn(UserEntity.EXPIRES_IN_DAYS_COLUMN, DataType.cint())
-          .addColumn(UserEntity.PASSWORD_RESET_ON_COLUMN, DataType.timestamp())
-          .buildInternal();
-
-      session.execute(createUsersTableStatement);
+      final StringBuilder createUsersTableStatement = new StringBuilder();
+      createUsersTableStatement.append("CREATE TABLE IF NOT EXISTS ").append(UserEntity.TABLE_NAME).append("(")
+      .append(UserEntity.NAME_COLUMN).append(" text , ")
+      .append(UserEntity.PASSWORD_COLUMN).append(" bytea , ")
+      .append(UserEntity.SALT_COLUMN).append(" bytea , ")
+      .append(UserEntity.ITERATION_COUNT_COLUMN).append(" int , ")
+      .append(UserEntity.EXPIRES_IN_DAYS_COLUMN).append(" int , ")
+      .append(UserEntity.PASSWORD_RESET_ON_COLUMN).append(" timestamp)");
+      statement.execute(createUsersTableStatement.toString());
 
       final String username = ApiConstants.SYSTEM_SU;
       final byte[] hashedPassword = Base64Utils.decodeFromString(ProvisionerConstants.INITIAL_PWD);
       final byte[] variableSalt = this.saltGenerator.createRandomSalt();
-      final BoundStatement userBoundStatement =
-          session.prepare("INSERT INTO users (name, passwordWord, salt, iteration_count, password_reset_on) VALUES (?, ?, ?, ?, ?)").bind();
-      userBoundStatement.setString("name", username);
-      userBoundStatement.setBytes("passwordWord", ByteBuffer.wrap(
-          this.hashGenerator.hash(Base64Utils.encodeToString(hashedPassword), EncodingUtils.concatenate(variableSalt, secret),
-              ProvisionerConstants.ITERATION_COUNT, ProvisionerConstants.HASH_LENGTH)));
-      userBoundStatement.setBytes("salt", ByteBuffer.wrap(variableSalt));
-      userBoundStatement.setInt("iteration_count", ProvisionerConstants.ITERATION_COUNT);
-      userBoundStatement.setTimestamp("password_reset_on", new Date());
-      session.execute(userBoundStatement);
+      final byte[] passwordHash = this.hashGenerator.hash(Base64Utils.encodeToString(hashedPassword), EncodingUtils.concatenate(variableSalt, secret),
+              ProvisionerConstants.ITERATION_COUNT, ProvisionerConstants.HASH_LENGTH);
+      final PreparedStatement userBoundStatement =
+              connection.prepareStatement("INSERT INTO users (name, passwordWord, salt, iteration_count, password_reset_on) VALUES (?, ?, ?, ?, ?)");
+      userBoundStatement.setString(1, username);
+      userBoundStatement.setBytes(2, passwordHash);
+      userBoundStatement.setBytes(3, variableSalt);
+      userBoundStatement.setInt(4, ProvisionerConstants.ITERATION_COUNT);
+      userBoundStatement.setTimestamp(5, new Timestamp(new Date().getTime()));
+      userBoundStatement.execute();
 
-      //create tenants family
-      final String createTenantsTableStatement = SchemaBuilder.createTable(TenantEntity.TABLE_NAME)
-          .addPartitionKey(TenantEntity.IDENTIFIER_COLUMN, DataType.text())
-          .addColumn(TenantEntity.CLUSTER_NAME_COLUMN, DataType.text())
-          .addColumn(TenantEntity.CONTACT_POINTS_COLUMN, DataType.text())
-          .addColumn(TenantEntity.KEYSPACE_NAME_COLUMN, DataType.text())
-          .addColumn(TenantEntity.REPLICATION_TYPE_COLUMN, DataType.text())
-          .addColumn(TenantEntity.REPLICAS_COLUMN, DataType.text())
-          .addColumn(TenantEntity.NAME_COLUMN, DataType.text())
-          .addColumn(TenantEntity.DESCRIPTION_COLUMN, DataType.text())
-          .addColumn(TenantEntity.IDENTITY_MANAGER_APPLICATION_NAME_COLUMN, DataType.text())
-          .addColumn(TenantEntity.IDENTITY_MANAGER_APPLICATION_URI_COLUMN, DataType.text())
-          .buildInternal();
 
-      session.execute(createTenantsTableStatement);
+//      final String createTenantsTableStatement = "CREATE TABLE IF NOT EXISTS "+TenantEntity.TABLE_NAME+" ("+
+//              TenantEntity.IDENTIFIER_COLUMN+ " text , "+
+//              TenantEntity.CLUSTER_NAME_COLUMN + " text , " +
+//              TenantEntity.CONTACT_POINTS_COLUMN+" text , " +
+//              TenantEntity.KEYSPACE_NAME_COLUMN+" text , "+
+//              TenantEntity.REPLICATION_TYPE_COLUMN+" text , "+
+//              TenantEntity.REPLICAS_COLUMN+" text , "+
+//              TenantEntity.NAME_COLUMN+" text , "+
+//              TenantEntity.DESCRIPTION_COLUMN+" text , "+
+//              TenantEntity.IDENTITY_MANAGER_APPLICATION_NAME_COLUMN+" text , "+
+//              TenantEntity.IDENTITY_MANAGER_APPLICATION_URI_COLUMN+" text )";
+//
+//              statement.execute(createTenantsTableStatement);
 
 
       //create services family
-      final String createApplicationsTableStatement =
-          SchemaBuilder.createTable(ApplicationEntity.TABLE_NAME)
-              .addPartitionKey(ApplicationEntity.NAME_COLUMN, DataType.text())
-              .addColumn(ApplicationEntity.DESCRIPTION_COLUMN, DataType.text())
-              .addColumn(ApplicationEntity.VENDOR_COLUMN, DataType.text())
-              .addColumn(ApplicationEntity.HOMEPAGE_COLUMN, DataType.text())
-              .buildInternal();
+      final StringBuilder createApplicationsTableStatement = new StringBuilder();
+      createApplicationsTableStatement.append("CREATE TABLE IF NOT EXISTS ").append(ApplicationEntity.TABLE_NAME).append("(")
+      .append(ApplicationEntity.NAME_COLUMN).append(" text , ")
+      .append(ApplicationEntity.DESCRIPTION_COLUMN).append(" text , ")
+      .append(ApplicationEntity.VENDOR_COLUMN).append(" text , ")
+      .append(ApplicationEntity.HOMEPAGE_COLUMN).append(" text )");
 
-      session.execute(createApplicationsTableStatement);
+      statement.execute(createApplicationsTableStatement.toString());
 
+      final StringBuilder createTenantApplicationsTableStatement = new StringBuilder();
+      createTenantApplicationsTableStatement.append("CREATE TABLE IF NOT EXISTS ").append(TenantApplicationEntity.TABLE_NAME).append("(")
+      .append(TenantApplicationEntity.TENANT_IDENTIFIER_COLUMN).append(" text , ")
+      .append(TenantApplicationEntity.ASSIGNED_APPLICATIONS_COLUMN).append(" text )");
 
-      //create org.apache.fineract.cn.provisioner.tenant services family
-      final String createTenantApplicationsTableStatement =
-          SchemaBuilder.createTable(TenantApplicationEntity.TABLE_NAME)
-              .addPartitionKey(TenantApplicationEntity.TENANT_IDENTIFIER_COLUMN, DataType.text())
-              .addColumn(TenantApplicationEntity.ASSIGNED_APPLICATIONS_COLUMN, DataType.set(DataType.text()))
-              .buildInternal();
-
-      session.execute(createTenantApplicationsTableStatement);
+      statement.execute(createTenantApplicationsTableStatement.toString());
 
 
       //create clients family
-      final String createClientsTableStatement =
-          SchemaBuilder.createTable(ClientEntity.TABLE_NAME)
-              .addPartitionKey(ClientEntity.NAME_COLUMN, DataType.text())
-              .addColumn(ClientEntity.DESCRIPTION_COLUMN, DataType.text())
-              .addColumn(ClientEntity.REDIRECT_URI_COLUMN, DataType.text())
-              .addColumn(ClientEntity.VENDOR_COLUMN, DataType.text())
-              .addColumn(ClientEntity.HOMEPAGE_COLUMN, DataType.text())
-              .buildInternal();
-      session.execute(createClientsTableStatement);
+      final StringBuilder createClientsTableStatement = new StringBuilder();
+      createClientsTableStatement.append("CREATE TABLE IF NOT EXISTS ").append(ClientEntity.TABLE_NAME).append(" (")
+              .append(ClientEntity.NAME_COLUMN).append(" text , ")
+              .append(ClientEntity.DESCRIPTION_COLUMN).append(" text , ")
+              .append(ClientEntity.REDIRECT_URI_COLUMN).append(" text , ")
+              .append(ClientEntity.VENDOR_COLUMN).append(" text , ")
+              .append(ClientEntity.HOMEPAGE_COLUMN).append(" text )");
+
+      statement.execute(createClientsTableStatement.toString());
+
       final String clientId = StringUtils.isEmpty(initialClientId) ? UUID.randomUUID().toString() : initialClientId;
       this.logger.info(clientId);
 
 
-      final BoundStatement clientBoundStatement = session.prepare("INSERT INTO clients (name, description, vendor, homepage) VALUES (?, ?, ?, ?)").bind();
-      clientBoundStatement.setString("name", clientId);
-      clientBoundStatement.setString("description", "REST Console");
-      clientBoundStatement.setString("vendor", "The Apache Software Foundation");
-      clientBoundStatement.setString("homepage", "https://fineract.apache.org");
-      session.execute(clientBoundStatement);
+      final PreparedStatement clientBoundStatement = connection.prepareStatement("INSERT INTO clients (name, description, vendor, homepage) VALUES (?, ?, ?, ?)");
+      clientBoundStatement.setString(1, clientId);
+      clientBoundStatement.setString(2, "REST Console");
+      clientBoundStatement.setString(3, "The Apache Software Foundation");
+      clientBoundStatement.setString(4, "https://fineract.apache.org");
+      clientBoundStatement.execute();
+
+    }
+    else{
+      if (session.getCluster().getMetadata().getKeyspace(metaKeySpaceName).getTable(ConfigEntity.TABLE_NAME) == null) {
+        //create config family
+        final String createConfigTableStatement = SchemaBuilder.createTable(ConfigEntity.TABLE_NAME)
+                .addPartitionKey(ConfigEntity.NAME_COLUMN, DataType.text())
+                .addColumn(ConfigEntity.SECRET_COLUMN, DataType.blob())
+                .buildInternal();
+
+        session.execute(createConfigTableStatement);
+
+        final byte[] secret = this.saltGenerator.createRandomSalt();
+        final BoundStatement configBoundStatement = session.prepare("INSERT INTO config (name, secret) VALUES (?, ?)").bind();
+        configBoundStatement.setString("name", ProvisionerConstants.CONFIG_INTERNAL);
+        configBoundStatement.setBytes("secret", ByteBuffer.wrap(secret));
+        session.execute(configBoundStatement);
+
+        //create users family
+        final String createUsersTableStatement = SchemaBuilder.createTable(UserEntity.TABLE_NAME)
+                .addPartitionKey(UserEntity.NAME_COLUMN, DataType.text())
+                .addColumn(UserEntity.PASSWORD_COLUMN, DataType.blob())
+                .addColumn(UserEntity.SALT_COLUMN, DataType.blob())
+                .addColumn(UserEntity.ITERATION_COUNT_COLUMN, DataType.cint())
+                .addColumn(UserEntity.EXPIRES_IN_DAYS_COLUMN, DataType.cint())
+                .addColumn(UserEntity.PASSWORD_RESET_ON_COLUMN, DataType.timestamp())
+                .buildInternal();
+
+        session.execute(createUsersTableStatement);
+
+        final String username = ApiConstants.SYSTEM_SU;
+        final byte[] hashedPassword = Base64Utils.decodeFromString(ProvisionerConstants.INITIAL_PWD);
+        final byte[] variableSalt = this.saltGenerator.createRandomSalt();
+        final BoundStatement userBoundStatement =
+                session.prepare("INSERT INTO users (name, passwordWord, salt, iteration_count, password_reset_on) VALUES (?, ?, ?, ?, ?)").bind();
+        userBoundStatement.setString("name", username);
+        userBoundStatement.setBytes("passwordWord", ByteBuffer.wrap(
+                this.hashGenerator.hash(Base64Utils.encodeToString(hashedPassword), EncodingUtils.concatenate(variableSalt, secret),
+                        ProvisionerConstants.ITERATION_COUNT, ProvisionerConstants.HASH_LENGTH)));
+        userBoundStatement.setBytes("salt", ByteBuffer.wrap(variableSalt));
+        userBoundStatement.setInt("iteration_count", ProvisionerConstants.ITERATION_COUNT);
+        userBoundStatement.setTimestamp("password_reset_on", new Date());
+        session.execute(userBoundStatement);
+
+        //create tenants family
+        final String createTenantsTableStatement = SchemaBuilder.createTable(TenantEntity.TABLE_NAME)
+                .addPartitionKey(TenantEntity.IDENTIFIER_COLUMN, DataType.text())
+                .addColumn(TenantEntity.CLUSTER_NAME_COLUMN, DataType.text())
+                .addColumn(TenantEntity.CONTACT_POINTS_COLUMN, DataType.text())
+                .addColumn(TenantEntity.KEYSPACE_NAME_COLUMN, DataType.text())
+                .addColumn(TenantEntity.REPLICATION_TYPE_COLUMN, DataType.text())
+                .addColumn(TenantEntity.REPLICAS_COLUMN, DataType.text())
+                .addColumn(TenantEntity.NAME_COLUMN, DataType.text())
+                .addColumn(TenantEntity.DESCRIPTION_COLUMN, DataType.text())
+                .addColumn(TenantEntity.IDENTITY_MANAGER_APPLICATION_NAME_COLUMN, DataType.text())
+                .addColumn(TenantEntity.IDENTITY_MANAGER_APPLICATION_URI_COLUMN, DataType.text())
+                .buildInternal();
+
+        session.execute(createTenantsTableStatement);
+
+
+        //create services family
+        final String createApplicationsTableStatement =
+                SchemaBuilder.createTable(ApplicationEntity.TABLE_NAME)
+                        .addPartitionKey(ApplicationEntity.NAME_COLUMN, DataType.text())
+                        .addColumn(ApplicationEntity.DESCRIPTION_COLUMN, DataType.text())
+                        .addColumn(ApplicationEntity.VENDOR_COLUMN, DataType.text())
+                        .addColumn(ApplicationEntity.HOMEPAGE_COLUMN, DataType.text())
+                        .buildInternal();
+
+        session.execute(createApplicationsTableStatement);
+
+
+        //create org.apache.fineract.cn.provisioner.tenant services family
+        final String createTenantApplicationsTableStatement =
+                SchemaBuilder.createTable(TenantApplicationEntity.TABLE_NAME)
+                        .addPartitionKey(TenantApplicationEntity.TENANT_IDENTIFIER_COLUMN, DataType.text())
+                        .addColumn(TenantApplicationEntity.ASSIGNED_APPLICATIONS_COLUMN, DataType.set(DataType.text()))
+                        .buildInternal();
+
+        session.execute(createTenantApplicationsTableStatement);
+
+
+        //create clients family
+        final String createClientsTableStatement =
+                SchemaBuilder.createTable(ClientEntity.TABLE_NAME)
+                        .addPartitionKey(ClientEntity.NAME_COLUMN, DataType.text())
+                        .addColumn(ClientEntity.DESCRIPTION_COLUMN, DataType.text())
+                        .addColumn(ClientEntity.REDIRECT_URI_COLUMN, DataType.text())
+                        .addColumn(ClientEntity.VENDOR_COLUMN, DataType.text())
+                        .addColumn(ClientEntity.HOMEPAGE_COLUMN, DataType.text())
+                        .buildInternal();
+        session.execute(createClientsTableStatement);
+        final String clientId = StringUtils.isEmpty(initialClientId) ? UUID.randomUUID().toString() : initialClientId;
+        this.logger.info(clientId);
+
+
+        final BoundStatement clientBoundStatement = session.prepare("INSERT INTO clients (name, description, vendor, homepage) VALUES (?, ?, ?, ?)").bind();
+        clientBoundStatement.setString("name", clientId);
+        clientBoundStatement.setString("description", "REST Console");
+        clientBoundStatement.setString("vendor", "The Apache Software Foundation");
+        clientBoundStatement.setString("homepage", "https://fineract.apache.org");
+        session.execute(clientBoundStatement);
+      }
     }
   }
 

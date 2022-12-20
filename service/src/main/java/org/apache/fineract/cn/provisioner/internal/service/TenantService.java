@@ -45,6 +45,7 @@ import org.apache.fineract.cn.lang.ServiceException;
 import org.slf4j.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
@@ -60,6 +61,8 @@ public class TenantService {
   private final TenantCassandraRepository tenantCassandraRepository;
   private final IdentityServiceInitializer identityServiceInitializer;
   private final ProvisionerProperties provisionerProperties;
+  @Value("${maindb.postgres}")
+  private boolean isMainDBPostgres;
 
 
   @Autowired
@@ -81,8 +84,12 @@ public class TenantService {
   }
 
   public void create(final Tenant tenant) {
-    this.initializeKeyspace(tenant);
-    this.initializeDatabase(tenant);
+    if(isMainDBPostgres) {
+      this.initializeDatabase(tenant);
+    }else {
+      this.initializeKeyspace(tenant);
+      this.initializeDatabase(tenant);
+    }
   }
 
   private void initializeKeyspace(final @Nonnull Tenant tenant) {
@@ -254,6 +261,22 @@ public class TenantService {
           tenantDAO.setUser(databaseConnectionInfo.getUser());
           tenantDAO.setPassword(databaseConnectionInfo.getPassword());
           tenantDAO.insert(provisionerConnection);
+
+//          statement.execute("USE database playground");
+
+          final Connection provisionerConnectionPlayground = DataSourceUtils.createProvisionerConnection(this.environment, tenant.getIdentifier());
+          final Statement statementPlayground = provisionerConnectionPlayground.createStatement();
+
+          final StringBuilder createClientsTableStatement = new StringBuilder();
+          createClientsTableStatement.append("CREATE TABLE IF NOT EXISTS command_source  (")
+                  .append("source text , ")
+                  .append("bucket text , ")
+                  .append("created_on text , ")
+                  .append("command text , ")
+                  .append("processed text , ")
+                  .append("failed text , ")
+                  .append( "failure_message text )");
+          statementPlayground.execute(createClientsTableStatement.toString());
         }
       } catch (SQLException sqlex) {
         this.logger.error(sqlex.getMessage(), sqlex);
