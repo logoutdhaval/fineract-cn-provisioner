@@ -46,6 +46,19 @@ postgresql:
   password: postgres
 
 spring:
+  profiles:
+    active:
+      cassandra
+  datasource:
+    driver-class-name: org.postgresql.Driver
+    url: jdbc:postgresql://localhost:5432/seshat
+    username: postgres
+    password: postgres
+---
+spring:
+  profiles:
+    active:
+      postgres
   datasource:
     driver-class-name: org.postgresql.Driver
     url: jdbc:postgresql://localhost:5432/seshat

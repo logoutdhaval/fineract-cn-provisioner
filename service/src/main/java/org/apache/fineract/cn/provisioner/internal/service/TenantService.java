@@ -61,8 +61,8 @@ public class TenantService {
   private final TenantCassandraRepository tenantCassandraRepository;
   private final IdentityServiceInitializer identityServiceInitializer;
   private final ProvisionerProperties provisionerProperties;
-  @Value("${maindb.postgres}")
-  private boolean isMainDBPostgres;
+  @Value("${spring.profiles.active}")
+  private String dbProfile;
 
 
   @Autowired
@@ -84,12 +84,10 @@ public class TenantService {
   }
 
   public void create(final Tenant tenant) {
-    if(isMainDBPostgres) {
-      this.initializeDatabase(tenant);
-    }else {
+    if(dbProfile.equals("cassandra")) {
       this.initializeKeyspace(tenant);
-      this.initializeDatabase(tenant);
     }
+      this.initializeDatabase(tenant);
   }
 
   private void initializeKeyspace(final @Nonnull Tenant tenant) {
