@@ -20,7 +20,7 @@ version '0.1.0-BUILD-SNAPSHOT'
 
 ext.versions = [
         fineractidentityservice : '0.1.0-BUILD-SNAPSHOT',
-        frameworkanubis         : '0.1.0-BUILD-SNAPSHOT',
+        frameworkanubis         : '0.1.1-BUILD-SNAPSHOT',
         frameworkanput          : '0.1.0-BUILD-SNAPSHOT',
         frameworkapi            : '0.1.0-BUILD-SNAPSHOT',
         frameworklang           : '0.1.0-BUILD-SNAPSHOT',
@@ -43,6 +43,7 @@ repositories {
     jcenter()
     mavenLocal()
     maven { url 'https://mifos.jfrog.io/mifos/libs-snapshot/' }
+    maven { url 'https://fynarfin.jfrog.io/artifactory/fyn-libs-snapshot-local/' }
 }
 
 dependencyManagement {
@@ -62,7 +63,11 @@ dependencies {
     compile(
             [group: 'com.google.code.findbugs', name: 'jsr305'],
             [group: 'org.apache.fineract.cn', name: 'postgresql', version: '0.1.0-BUILD-SNAPSHOT'],
-            [group: 'postgresql', name: 'postgresql', version: '9.0-801.jdbc4']
+            [group: 'postgresql', name: 'postgresql', version: '9.0-801.jdbc4'],
+//            [group: 'org.apache.fineract.cn', name: 'anubis', version: '0.1.1-SNAPSHOT'],
+            [group: 'org.apache.fineract.cn.anubis', name: 'api', version: '0.1.1-BUILD-SNAPSHOT'],
+            [group: 'org.apache.fineract.cn.anubis', name: 'library', version: '0.1.1-BUILD-SNAPSHOT'],
+            [group: 'org.apache.fineract.cn.anubis', name: 'test', version: '0.1.1-BUILD-SNAPSHOT'],
     )
 
     testCompile(

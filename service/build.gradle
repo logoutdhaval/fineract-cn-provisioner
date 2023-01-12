@@ -21,9 +21,12 @@ buildscript {
     }
 
     repositories {
+        maven {
+            url = uri('https://fynarfin.jfrog.io/artifactory/fyn-libs-snapshot-local/')
+        }
         jcenter()
     }
-    }
+}
 
 plugins {
     id 'com.github.hierynomus.license' version '0.13.1'

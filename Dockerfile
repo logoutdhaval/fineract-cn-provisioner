@@ -20,8 +20,8 @@ FROM openjdk:8-jdk-alpine AS builder
 RUN mkdir builddir
 COPY . builddir
 WORKDIR builddir
+RUN ./gradlew clean
 RUN ./gradlew publishToMavenLocal
-
 
 FROM openjdk:8-jdk-alpine AS runner
 
